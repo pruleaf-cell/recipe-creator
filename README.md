@@ -56,3 +56,5 @@ After first push, ensure repository settings use:
 Expected public URL format:
 
 `https://<github-username>.github.io/<repository-name>/`
+
+Workflow note: this commit is prepared for PR merge into main.

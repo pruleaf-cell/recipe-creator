@@ -1,14 +1,12 @@
 :root {
-  --bg: #fbf7ef;
-  --surface: #fffdf8;
-  --surface-strong: #f7efe2;
-  --text: #22211f;
-  --text-muted: #5d5a54;
-  --accent: #1d7f58;
-  --accent-strong: #0d5f3f;
-  --danger: #b63939;
-  --border: #dcccb5;
-  --shadow: 0 10px 25px rgba(50, 35, 12, 0.12);
+  --bg: #f6f0e2;
+  --panel: #fffdf7;
+  --text: #25211c;
+  --muted: #5c554b;
+  --accent: #206f4d;
+  --accent-strong: #12563a;
+  --line: #d8c8ae;
+  --shadow: 0 14px 32px rgba(50, 33, 13, 0.12);
 }
 
 * {
@@ -23,31 +21,24 @@ body,
 }
 
 body {
-  min-width: 320px;
-  background: radial-gradient(circle at top right, #f3e3c7 0%, var(--bg) 45%, #f9f5ea 100%);
+  background: radial-gradient(circle at top left, #f8f4e4 0%, #f2ead8 38%, #f7f4eb 100%);
   color: var(--text);
-  font-family: 'Segoe UI', 'Gill Sans', 'Trebuchet MS', sans-serif;
+  min-width: 320px;
+  font-family: 'Trebuchet MS', 'Lucida Grande', 'Lucida Sans Unicode', sans-serif;
 }
 
 h1,
 h2,
 h3,
 h4 {
-  font-family: 'Palatino', 'Book Antiqua', serif;
+  font-family: 'Baskerville', 'Book Antiqua', 'Palatino Linotype', serif;
   letter-spacing: 0.01em;
-}
-
-button,
-input,
-textarea,
-select {
-  font: inherit;
 }
 
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,
 select:focus-visible {
-  outline: 3px solid #1d7f5880;
+  outline: 3px solid #216b8480;
   outline-offset: 2px;
 }

@@ -39,6 +39,8 @@ export interface MethodStep {
   text: string
   timerMinutes?: number
   notes?: string
+  temperatureC?: number
+  gasMark?: string
 }
 
 export interface Recipe {
@@ -55,7 +57,8 @@ export interface Recipe {
   ingredients: Ingredient[]
   steps: MethodStep[]
   swapSuggestions: string[]
-  source?: 'base' | 'custom' | 'shared'
+  tips?: string[]
+  source?: 'base' | 'custom' | 'shared' | 'llm'
 }
 
 export interface Preferences {
@@ -65,4 +68,18 @@ export interface Preferences {
   dietary: DietaryTag[]
   allergensToAvoid: Allergen[]
   equipment: Equipment[]
+}
+
+export interface AiSettings {
+  apiKey: string
+  model: string
+  endpoint: string
+  creativity: number
+  rememberKey: boolean
+}
+
+export interface ConversationTurn {
+  role: 'user' | 'assistant'
+  text: string
+  createdAt: string
 }

@@ -1,0 +1,285 @@
+.app-shell {
+  width: min(1200px, 94vw);
+  margin: 1.75rem auto 2.5rem;
+}
+
+.hero {
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: linear-gradient(140deg, #fff7eb, #f6f2e8);
+  box-shadow: var(--shadow);
+}
+
+.hero h1 {
+  margin: 0.2rem 0 0.6rem;
+  font-size: clamp(1.8rem, 3.8vw, 2.8rem);
+}
+
+.hero p {
+  margin: 0;
+  color: var(--text-muted);
+  max-width: 70ch;
+}
+
+.eyebrow {
+  margin: 0;
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--accent-strong);
+}
+
+.tabs {
+  margin-top: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.tabs button {
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  padding: 0.6rem 0.95rem;
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.tabs button.active {
+  border-color: transparent;
+  background: var(--accent);
+  color: #fff;
+}
+
+.panel-grid {
+  margin-top: 1rem;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: minmax(280px, 380px) 1fr;
+  align-items: start;
+}
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  padding: 1rem;
+  box-shadow: var(--shadow);
+}
+
+.panel h2,
+.panel h3,
+.panel h4 {
+  margin-top: 0;
+}
+
+.inline-form {
+  display: grid;
+  gap: 0.5rem;
+  margin-bottom: 0.8rem;
+}
+
+.field-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 0.45rem;
+  margin-bottom: 0.8rem;
+}
+
+.checkbox-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.35rem;
+}
+
+fieldset {
+  margin: 0.8rem 0;
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  padding: 0.65rem;
+}
+
+legend {
+  font-weight: 600;
+  padding: 0 0.3rem;
+}
+
+input,
+textarea,
+select {
+  border: 1px solid #c9bba9;
+  border-radius: 0.55rem;
+  padding: 0.55rem 0.6rem;
+  background: #fff;
+  color: var(--text);
+}
+
+textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
+button {
+  border: 1px solid transparent;
+  border-radius: 0.55rem;
+  padding: 0.55rem 0.8rem;
+  background: var(--accent);
+  color: #fff;
+  cursor: pointer;
+}
+
+button:hover {
+  background: var(--accent-strong);
+}
+
+button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.import-label {
+  border: 1px dashed var(--border);
+  border-radius: 0.55rem;
+  padding: 0.55rem 0.8rem;
+  display: inline-block;
+  cursor: pointer;
+}
+
+input[type='file'] {
+  display: none;
+}
+
+.status-message,
+.error-message {
+  border-radius: 0.7rem;
+  padding: 0.65rem 0.8rem;
+  margin-top: 0.9rem;
+}
+
+.status-message {
+  background: #e8f8ef;
+  border: 1px solid #9fd9bd;
+}
+
+.error-message {
+  background: #ffeceb;
+  border: 1px solid #e6a5a0;
+  color: var(--danger);
+}
+
+.chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-bottom: 0.85rem;
+}
+
+.chip {
+  background: var(--surface-strong);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.3rem 0.5rem;
+}
+
+.chip:hover {
+  background: #f2e6d2;
+}
+
+.list-reset {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.list-reset li {
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  padding: 0.55rem;
+  background: #fffdf9;
+  display: grid;
+  gap: 0.45rem;
+}
+
+.link-button {
+  background: transparent;
+  color: var(--accent-strong);
+  border: 0;
+  padding: 0;
+  text-align: left;
+}
+
+.link-button:hover {
+  text-decoration: underline;
+  background: transparent;
+}
+
+.recipe-results {
+  min-height: 360px;
+}
+
+.recipe-grid {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.recipe-card {
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  padding: 0.9rem;
+  background: #fffcf5;
+}
+
+.recipe-card .meta {
+  color: var(--text-muted);
+  margin-top: 0.4rem;
+}
+
+.recipe-card section {
+  margin-top: 0.7rem;
+}
+
+.recipe-card ul,
+.recipe-card ol {
+  margin: 0;
+  padding-left: 1.2rem;
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.7rem;
+}
+
+.empty-state {
+  color: var(--text-muted);
+  border: 1px dashed var(--border);
+  border-radius: 0.7rem;
+  padding: 0.75rem;
+}
+
+.builder-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.builder-row {
+  border: 1px solid var(--border);
+  border-radius: 0.7rem;
+  padding: 0.55rem;
+  display: grid;
+  gap: 0.5rem;
+}
+
+@media (max-width: 960px) {
+  .panel-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .app-shell {
+    width: min(680px, 95vw);
+  }
+}

@@ -161,6 +161,28 @@ export const hasIngredient = (ingredientName: string, pantryItems: string[]): bo
 export const missingIngredients = (recipe: Recipe, pantryItems: string[]): Ingredient[] =>
   recipe.ingredients.filter((ingredient) => !hasIngredient(ingredient.name, pantryItems))
 
+export const pantryFitPercent = (recipe: Recipe, pantryItems: string[]): number => {
+  if (recipe.ingredients.length === 0) {
+    return 0
+  }
+
+  const missingCount = missingIngredients(recipe, pantryItems).length
+  const fit = ((recipe.ingredients.length - missingCount) / recipe.ingredients.length) * 100
+  return Math.max(0, Math.min(100, Math.round(fit)))
+}
+
+export const buildShoppingList = (recipes: Recipe[], pantryItems: string[]): string[] => {
+  const neededItems = new Set<string>()
+
+  recipes.forEach((recipe) => {
+    missingIngredients(recipe, pantryItems).forEach((ingredient) => {
+      neededItems.add(ingredient.name)
+    })
+  })
+
+  return Array.from(neededItems).sort((a, b) => a.localeCompare(b))
+}
+
 export const buildSwapSuggestions = (
   recipe: Recipe,
   dietary: DietaryTag[],

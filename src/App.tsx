@@ -3,34 +3,41 @@ import type { ChangeEvent, FormEvent } from 'react'
 import './App.css'
 import { baseRecipes } from './data/baseRecipes'
 import type {
+  AiSettings,
+  ConversationTurn,
   Equipment,
   Ingredient,
-  MethodStep,
   Preferences,
   Recipe,
 } from './types'
-import { decodeRecipeFromUrl, buildShareUrl } from './utils/share'
+import { buildShareUrl, decodeRecipeFromUrl } from './utils/share'
 import { readStorage, writeStorage } from './utils/storage'
 import {
   ALLERGEN_OPTIONS,
   DIETARY_OPTIONS,
   PANTRY_SUGGESTIONS,
   UNIT_OPTIONS,
+  buildShoppingList,
   buildSwapSuggestions,
   formatIngredient,
   generateRecipeOptions,
   isRecipeLike,
   missingIngredients,
   normalisePantryItems,
+  pantryFitPercent,
   recipeToPlainText,
   scaleIngredients,
 } from './utils/recipeEngine'
+import { generateRecipesWithLlm } from './utils/llm'
 
 const STORAGE_KEYS = {
-  pantry: 'recipe-creator-pantry-v1',
-  preferences: 'recipe-creator-preferences-v1',
-  customRecipes: 'recipe-creator-custom-recipes-v1',
+  pantry: 'recipe-creator-pantry-v2',
+  preferences: 'recipe-creator-preferences-v2',
+  customRecipes: 'recipe-creator-custom-recipes-v2',
+  aiSettings: 'recipe-creator-ai-settings-v2',
 }
+
+const equipmentOptions: Equipment[] = ['hob', 'oven', 'air-fryer']
 
 const defaultPreferences: Preferences = {
   servings: 4,
@@ -38,77 +45,76 @@ const defaultPreferences: Preferences = {
   cuisine: '',
   dietary: [],
   allergensToAvoid: [],
-  equipment: [],
+  equipment: ['hob', 'oven'],
 }
 
-const defaultIngredient = (): Ingredient => ({
-  name: '',
-  quantity: 100,
-  unit: 'g',
-  notes: '',
-  optional: false,
-})
+const defaultAiSettings: AiSettings = {
+  apiKey: '',
+  model: 'gpt-4.1-mini',
+  endpoint: 'https://api.openai.com/v1/chat/completions',
+  creativity: 0.8,
+  rememberKey: false,
+}
 
-const defaultStep = (): MethodStep => ({
-  text: '',
-  timerMinutes: undefined,
-  notes: '',
-})
+const defaultGoals = [
+  'Fast, flavour-packed weeknight meals with minimal washing up.',
+  'High-protein comfort bowls using pantry-heavy ingredients.',
+  'Impressive dinner-party mains with one easy side.',
+  'Budget-friendly, family-style meals with leftovers.',
+]
 
-const createEmptyRecipe = (): Recipe => ({
-  id: '',
-  title: '',
-  description: '',
-  cuisine: '',
-  difficulty: 'Easy',
-  cookTimeMinutes: 30,
-  servings: 4,
-  dietaryTags: [],
-  allergens: [],
-  equipment: ['hob'],
-  ingredients: [defaultIngredient()],
-  steps: [defaultStep()],
-  swapSuggestions: [],
-  source: 'custom',
-})
+interface CookModeState {
+  recipeId: string
+  stepIndex: number
+  timerEndsAt?: number
+}
 
-const normalizeImportedRecipe = (recipe: Recipe): Recipe => ({
-  ...recipe,
-  id: recipe.id || `imported-${crypto.randomUUID()}`,
-  title: recipe.title || 'Imported recipe',
-  description: recipe.description || 'Imported from JSON/share link.',
-  cuisine: recipe.cuisine || 'Custom',
-  difficulty: recipe.difficulty || 'Easy',
-  cookTimeMinutes: Math.max(5, recipe.cookTimeMinutes || 30),
-  servings: Math.max(1, recipe.servings || 4),
-  dietaryTags: recipe.dietaryTags ?? [],
-  allergens: recipe.allergens ?? [],
-  equipment: recipe.equipment?.length ? recipe.equipment : ['hob'],
-  ingredients:
-    recipe.ingredients?.length > 0
-      ? recipe.ingredients.map((ingredient) => ({
-          ...ingredient,
-          quantity: ingredient.quantity || 0,
-          unit: ingredient.unit || 'g',
-        }))
-      : [defaultIngredient()],
-  steps:
-    recipe.steps?.length > 0
-      ? recipe.steps.map((step) => ({
-          ...step,
-          text: step.text || '',
-        }))
-      : [defaultStep()],
-  swapSuggestions: recipe.swapSuggestions ?? [],
-  source: recipe.source ?? 'custom',
-})
+interface CompareSelection {
+  left?: string
+  right?: string
+}
+
+const getId = (prefix: string): string => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}-${crypto.randomUUID()}`
+  }
+
+  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
 
 const toggleListValue = <T extends string>(list: T[], value: T): T[] =>
   list.includes(value) ? list.filter((item) => item !== value) : [...list, value]
 
-function App() {
-  const [activeTab, setActiveTab] = useState<'generator' | 'builder'>('generator')
+const ensureUniqueRecipes = (recipes: Recipe[]): Recipe[] => {
+  const map = new Map<string, Recipe>()
+  recipes.forEach((recipe) => {
+    map.set(recipe.id, recipe)
+  })
+  return Array.from(map.values())
+}
 
+const normalizeRecipeForStorage = (recipe: Recipe): Recipe => ({
+  ...recipe,
+  id: recipe.id || getId('recipe'),
+  title: recipe.title.trim() || 'Untitled recipe',
+  description: recipe.description.trim() || 'No description.',
+  cuisine: recipe.cuisine.trim() || 'Fusion',
+  cookTimeMinutes: Math.max(5, Math.round(recipe.cookTimeMinutes || 30)),
+  servings: Math.max(1, Math.round(recipe.servings || 1)),
+  ingredients:
+    recipe.ingredients.length > 0
+      ? recipe.ingredients
+      : [{ name: 'water', quantity: 500, unit: 'ml', optional: false }],
+  steps:
+    recipe.steps.length > 0
+      ? recipe.steps
+      : [
+          { text: 'Prepare ingredients.' },
+          { text: 'Cook and season to taste.' },
+        ],
+})
+
+function App() {
   const [pantryInput, setPantryInput] = useState('')
   const [pantryItems, setPantryItems] = useState<string[]>(() =>
     readStorage<string[]>(STORAGE_KEYS.pantry, []),
@@ -116,28 +122,31 @@ function App() {
   const [preferences, setPreferences] = useState<Preferences>(() =>
     readStorage<Preferences>(STORAGE_KEYS.preferences, defaultPreferences),
   )
+
+  const initialAiSettings = readStorage<AiSettings>(STORAGE_KEYS.aiSettings, defaultAiSettings)
+  const [aiSettings, setAiSettings] = useState<AiSettings>(() => ({
+    ...defaultAiSettings,
+    ...initialAiSettings,
+    apiKey: initialAiSettings.rememberKey ? initialAiSettings.apiKey : '',
+  }))
+
   const [customRecipes, setCustomRecipes] = useState<Recipe[]>(() =>
     readStorage<Recipe[]>(STORAGE_KEYS.customRecipes, []),
   )
-
   const [generatedRecipes, setGeneratedRecipes] = useState<Recipe[]>([])
-  const [sharedRecipe, setSharedRecipe] = useState<Recipe | null>(null)
-
-  const [builderRecipe, setBuilderRecipe] = useState<Recipe>(createEmptyRecipe)
+  const [selectedRecipeId, setSelectedRecipeId] = useState<string | null>(null)
   const [editingRecipeId, setEditingRecipeId] = useState<string | null>(null)
-
+  const [goalPrompt, setGoalPrompt] = useState(defaultGoals[0])
+  const [followUpPrompt, setFollowUpPrompt] = useState('')
+  const [recipeCount, setRecipeCount] = useState(4)
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [conversation, setConversation] = useState<ConversationTurn[]>([])
   const [statusMessage, setStatusMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
-
-  const allRecipes = useMemo(() => {
-    const map = new Map<string, Recipe>()
-
-    ;[...baseRecipes, ...customRecipes, ...(sharedRecipe ? [sharedRecipe] : [])].forEach((recipe) => {
-      map.set(recipe.id, recipe)
-    })
-
-    return Array.from(map.values())
-  }, [customRecipes, sharedRecipe])
+  const [cookMode, setCookMode] = useState<CookModeState | null>(null)
+  const [clockTick, setClockTick] = useState(Date.now())
+  const [servingOverrides, setServingOverrides] = useState<Record<string, number>>({})
+  const [compareSelection, setCompareSelection] = useState<CompareSelection>({})
 
   useEffect(() => {
     writeStorage(STORAGE_KEYS.pantry, pantryItems)
@@ -148,8 +157,39 @@ function App() {
   }, [preferences])
 
   useEffect(() => {
-    writeStorage(STORAGE_KEYS.customRecipes, customRecipes)
+    writeStorage(STORAGE_KEYS.customRecipes, customRecipes.map(normalizeRecipeForStorage))
   }, [customRecipes])
+
+  useEffect(() => {
+    const persisted: AiSettings = {
+      ...aiSettings,
+      apiKey: aiSettings.rememberKey ? aiSettings.apiKey : '',
+    }
+    writeStorage(STORAGE_KEYS.aiSettings, persisted)
+  }, [aiSettings])
+
+  useEffect(() => {
+    if (!cookMode?.timerEndsAt) {
+      return
+    }
+
+    const interval = window.setInterval(() => {
+      setClockTick(Date.now())
+    }, 1000)
+
+    return () => window.clearInterval(interval)
+  }, [cookMode?.timerEndsAt])
+
+  useEffect(() => {
+    if (!cookMode?.timerEndsAt) {
+      return
+    }
+
+    if (cookMode.timerEndsAt <= clockTick) {
+      setCookMode((current) => (current ? { ...current, timerEndsAt: undefined } : current))
+      setStatusMessage('Step timer complete. Move to the next instruction.')
+    }
+  }, [clockTick, cookMode])
 
   useEffect(() => {
     const encodedRecipe = new URLSearchParams(window.location.search).get('recipe')
@@ -159,60 +199,169 @@ function App() {
 
     const decoded = decodeRecipeFromUrl(encodedRecipe)
     if (decoded && isRecipeLike(decoded)) {
-      const normalized = normalizeImportedRecipe({ ...decoded, source: 'shared' })
-      setSharedRecipe(normalized)
-      setGeneratedRecipes((existing) => [normalized, ...existing.filter((recipe) => recipe.id !== normalized.id)])
-      setStatusMessage('Loaded recipe from share link.')
-      return
+      const normalized = normalizeRecipeForStorage({ ...decoded, source: 'shared', id: getId('shared') })
+      setGeneratedRecipes((current) => ensureUniqueRecipes([normalized, ...current]))
+      setSelectedRecipeId(normalized.id)
+      setStatusMessage('Loaded shared recipe from URL.')
     }
-
-    setErrorMessage('Could not load recipe from the link.')
   }, [])
 
-  const handleAddPantryItem = (rawItem: string) => {
-    const nextItems = normalisePantryItems([...pantryItems, rawItem])
-    if (nextItems.length === pantryItems.length) {
-      return
-    }
+  const selectedRecipe = useMemo(
+    () => generatedRecipes.find((recipe) => recipe.id === selectedRecipeId) ?? null,
+    [generatedRecipes, selectedRecipeId],
+  )
 
+  const compareLeft = useMemo(
+    () => generatedRecipes.find((recipe) => recipe.id === compareSelection.left) ?? null,
+    [generatedRecipes, compareSelection.left],
+  )
+
+  const compareRight = useMemo(
+    () => generatedRecipes.find((recipe) => recipe.id === compareSelection.right) ?? null,
+    [generatedRecipes, compareSelection.right],
+  )
+
+  const shoppingList = useMemo(
+    () => buildShoppingList(generatedRecipes, pantryItems),
+    [generatedRecipes, pantryItems],
+  )
+
+  const activeCookRecipe = useMemo(
+    () => generatedRecipes.find((recipe) => recipe.id === cookMode?.recipeId) ?? null,
+    [generatedRecipes, cookMode?.recipeId],
+  )
+
+  const activeCookStep =
+    activeCookRecipe && cookMode ? activeCookRecipe.steps[cookMode.stepIndex] ?? null : null
+
+  const timerSecondsRemaining = cookMode?.timerEndsAt
+    ? Math.max(0, Math.ceil((cookMode.timerEndsAt - clockTick) / 1000))
+    : 0
+
+  const addPantryItem = (rawItem: string) => {
+    const nextItems = normalisePantryItems([...pantryItems, rawItem])
     setPantryItems(nextItems)
     setPantryInput('')
   }
 
-  const handlePantrySubmit = (event: FormEvent) => {
+  const handlePantrySubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault()
     if (!pantryInput.trim()) {
       return
     }
-
-    handleAddPantryItem(pantryInput)
+    addPantryItem(pantryInput)
   }
 
-  const handleGenerateRecipes = () => {
+  const recordConversation = (role: ConversationTurn['role'], text: string) => {
+    setConversation((current) => [
+      { role, text, createdAt: new Date().toISOString() },
+      ...current,
+    ])
+  }
+
+  const applyGeneratedRecipes = (nextRecipes: Recipe[], summary: string) => {
+    setGeneratedRecipes(nextRecipes)
+    setSelectedRecipeId(nextRecipes[0]?.id ?? null)
+    setStatusMessage(summary)
     setErrorMessage('')
-    setStatusMessage('')
+  }
 
-    const options = generateRecipeOptions(allRecipes, pantryItems, preferences)
-    setGeneratedRecipes(options)
+  const generateOfflineFallback = () => {
+    const options = generateRecipeOptions([...baseRecipes, ...customRecipes], pantryItems, preferences)
+    applyGeneratedRecipes(options, 'Generated from offline library. Add an API key for dynamic AI recipes.')
+    recordConversation('assistant', 'Used offline fallback generation because no API key was provided.')
+  }
 
-    if (options.length === 0) {
-      setStatusMessage('No recipes match those constraints yet. Loosen one preference and try again.')
+  const runGeneration = async (goal: string) => {
+    if (!aiSettings.apiKey.trim()) {
+      generateOfflineFallback()
       return
     }
 
-    setStatusMessage(`Generated ${options.length} recipe options.`)
+    const outcome = await generateRecipesWithLlm({
+      pantryItems,
+      preferences,
+      goal,
+      recipeCount,
+      settings: aiSettings,
+    })
+
+    applyGeneratedRecipes(outcome.recipes, outcome.assistantSummary)
+    recordConversation('assistant', outcome.assistantSummary)
   }
 
-  const downloadRecipeJson = (recipe: Recipe) => {
-    const blob = new Blob([JSON.stringify(recipe, null, 2)], {
-      type: 'application/json;charset=utf-8',
+  const handleGenerateRecipes = async () => {
+    setIsGenerating(true)
+    setErrorMessage('')
+    recordConversation('user', goalPrompt)
+
+    try {
+      await runGeneration(goalPrompt)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown generation error.'
+      setErrorMessage(message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const handleRefineRecipe = async () => {
+    if (!selectedRecipe || !followUpPrompt.trim()) {
+      setErrorMessage('Select a recipe and provide a follow-up refinement request.')
+      return
+    }
+
+    if (!aiSettings.apiKey.trim()) {
+      setErrorMessage('Add an API key to run recipe refinements.')
+      return
+    }
+
+    setIsGenerating(true)
+    setErrorMessage('')
+    recordConversation('user', `Refine ${selectedRecipe.title}: ${followUpPrompt}`)
+
+    try {
+      const outcome = await generateRecipesWithLlm({
+        pantryItems,
+        preferences,
+        goal: `Refine recipe: ${selectedRecipe.title}`,
+        recipeCount: 2,
+        settings: aiSettings,
+        refinementContext: {
+          recipe: selectedRecipe,
+          instruction: followUpPrompt,
+        },
+      })
+
+      const replacement = outcome.recipes
+      const kept = generatedRecipes.filter((recipe) => recipe.id !== selectedRecipe.id)
+      const merged = ensureUniqueRecipes([...replacement, ...kept]).slice(0, 8)
+      applyGeneratedRecipes(merged, outcome.assistantSummary)
+      setFollowUpPrompt('')
+      recordConversation('assistant', outcome.assistantSummary)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Unknown refinement error.'
+      setErrorMessage(message)
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  const updateRecipe = (recipeId: string, updater: (recipe: Recipe) => Recipe) => {
+    setGeneratedRecipes((current) =>
+      current.map((recipe) => (recipe.id === recipeId ? normalizeRecipeForStorage(updater(recipe)) : recipe)),
+    )
+  }
+
+  const duplicateIntoCookbook = (recipe: Recipe) => {
+    const clone = normalizeRecipeForStorage({
+      ...recipe,
+      id: getId('custom'),
+      source: 'custom',
     })
-    const url = URL.createObjectURL(blob)
-    const anchor = document.createElement('a')
-    anchor.href = url
-    anchor.download = `${recipe.title.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'recipe'}.json`
-    anchor.click()
-    URL.revokeObjectURL(url)
+
+    setCustomRecipes((current) => [clone, ...current])
+    setStatusMessage(`Saved ${recipe.title} to your cookbook.`)
   }
 
   const copyText = async (text: string, successMessage: string) => {
@@ -224,23 +373,34 @@ function App() {
     }
   }
 
-  const handleCopyRecipe = async (recipe: Recipe) => {
-    const scaled = scaleIngredients(recipe.ingredients, recipe.servings, preferences.servings)
+  const copyRecipe = async (recipe: Recipe) => {
+    const targetServings = servingOverrides[recipe.id] ?? preferences.servings
+    const scaled = scaleIngredients(recipe.ingredients, recipe.servings, targetServings)
     const missing = missingIngredients(recipe, pantryItems)
     const swaps = buildSwapSuggestions(recipe, preferences.dietary, pantryItems)
+
     await copyText(
-      recipeToPlainText(recipe, scaled, missing, swaps),
-      `Copied ${recipe.title} to clipboard.`,
+      recipeToPlainText({ ...recipe, servings: targetServings }, scaled, missing, swaps),
+      `Copied ${recipe.title}.`,
     )
   }
 
-  const handleCopyShareLink = async (recipe: Recipe) => {
-    await copyText(buildShareUrl(recipe), `Copied share link for ${recipe.title}.`)
+  const exportRecipe = (recipe: Recipe) => {
+    const blob = new Blob([JSON.stringify(recipe, null, 2)], {
+      type: 'application/json;charset=utf-8',
+    })
+
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = `${recipe.title.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'recipe'}.json`
+    link.click()
+    URL.revokeObjectURL(url)
   }
 
-  const handleImport = (event: ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = event.target.files?.[0]
-    if (!selectedFile) {
+  const importRecipes = (event: ChangeEvent<HTMLInputElement>) => {
+    const inputFile = event.target.files?.[0]
+    if (!inputFile) {
       return
     }
 
@@ -248,738 +408,775 @@ function App() {
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result))
-        const importedList = (Array.isArray(parsed) ? parsed : [parsed])
-          .filter((item) => isRecipeLike(item))
-          .map((item) => normalizeImportedRecipe({ ...item, source: 'custom' }))
+        const list = (Array.isArray(parsed) ? parsed : [parsed])
+          .filter((entry) => isRecipeLike(entry))
+          .map((entry) => normalizeRecipeForStorage({ ...entry, source: 'custom', id: getId('import') }))
 
-        if (importedList.length === 0) {
-          setErrorMessage('Import failed: no valid recipe objects found in the file.')
+        if (list.length === 0) {
+          setErrorMessage('No valid recipe objects found in the imported JSON.')
           return
         }
 
-        setCustomRecipes((existing) => {
-          const map = new Map(existing.map((recipe) => [recipe.id, recipe]))
-          importedList.forEach((recipe) => map.set(recipe.id, recipe))
-          return Array.from(map.values())
-        })
-        setStatusMessage(`Imported ${importedList.length} recipe(s).`)
-        setErrorMessage('')
+        setCustomRecipes((current) => ensureUniqueRecipes([...list, ...current]))
+        setStatusMessage(`Imported ${list.length} recipe(s) into cookbook.`)
       } catch {
-        setErrorMessage('Import failed: file is not valid JSON.')
+        setErrorMessage('Import failed: invalid JSON file.')
       } finally {
         event.target.value = ''
       }
     }
 
-    reader.readAsText(selectedFile)
+    reader.readAsText(inputFile)
   }
 
-  const updateBuilderIngredient = (
-    index: number,
-    key: keyof Ingredient,
-    value: string | number | boolean,
-  ) => {
-    setBuilderRecipe((current) => ({
-      ...current,
-      ingredients: current.ingredients.map((ingredient, ingredientIndex) => {
-        if (ingredientIndex !== index) {
-          return ingredient
-        }
-
-        return { ...ingredient, [key]: value }
-      }),
-    }))
+  const removeCookbookRecipe = (recipeId: string) => {
+    setCustomRecipes((current) => current.filter((recipe) => recipe.id !== recipeId))
   }
 
-  const updateBuilderStep = (index: number, key: keyof MethodStep, value: string | number | undefined) => {
-    setBuilderRecipe((current) => ({
-      ...current,
-      steps: current.steps.map((step, stepIndex) => {
-        if (stepIndex !== index) {
-          return step
-        }
-
-        return { ...step, [key]: value }
-      }),
-    }))
+  const loadCookbookRecipe = (recipe: Recipe) => {
+    const clone = normalizeRecipeForStorage({ ...recipe, id: getId('cookbook-load') })
+    setGeneratedRecipes((current) => ensureUniqueRecipes([clone, ...current]))
+    setSelectedRecipeId(clone.id)
+    setStatusMessage(`Loaded ${recipe.title} from cookbook.`)
   }
 
-  const resetBuilder = () => {
-    setBuilderRecipe(createEmptyRecipe())
-    setEditingRecipeId(null)
+  const assignCompare = (slot: keyof CompareSelection, recipeId: string) => {
+    setCompareSelection((current) => ({ ...current, [slot]: recipeId }))
   }
 
-  const saveBuilderRecipe = () => {
-    setErrorMessage('')
+  const startCookMode = (recipeId: string) => {
+    setCookMode({ recipeId, stepIndex: 0 })
+  }
 
-    const cleanTitle = builderRecipe.title.trim()
-    const filledIngredients = builderRecipe.ingredients.filter((ingredient) => ingredient.name.trim())
-    const filledSteps = builderRecipe.steps.filter((step) => step.text.trim())
+  const moveCookStep = (delta: number) => {
+    setCookMode((current) => {
+      if (!current) {
+        return current
+      }
 
-    if (!cleanTitle || filledIngredients.length === 0 || filledSteps.length === 0) {
-      setErrorMessage('Recipe builder needs a title, at least one ingredient, and one method step.')
+      const recipe = generatedRecipes.find((item) => item.id === current.recipeId)
+      if (!recipe) {
+        return null
+      }
+
+      const nextIndex = Math.min(Math.max(current.stepIndex + delta, 0), recipe.steps.length - 1)
+      return { ...current, stepIndex: nextIndex, timerEndsAt: undefined }
+    })
+  }
+
+  const startStepTimer = () => {
+    if (!activeCookStep?.timerMinutes || !cookMode) {
       return
     }
 
-    const normalized: Recipe = normalizeImportedRecipe({
-      ...builderRecipe,
-      id: editingRecipeId ?? `custom-${crypto.randomUUID()}`,
-      title: cleanTitle,
-      ingredients: filledIngredients,
-      steps: filledSteps,
-      source: 'custom',
-    })
-
-    setCustomRecipes((current) => {
-      if (editingRecipeId) {
-        return current.map((recipe) => (recipe.id === editingRecipeId ? normalized : recipe))
-      }
-
-      return [normalized, ...current]
-    })
-
-    resetBuilder()
-    setStatusMessage(editingRecipeId ? 'Recipe updated.' : 'Recipe saved to local storage.')
-  }
-
-  const editRecipe = (recipe: Recipe) => {
-    setActiveTab('builder')
-    setEditingRecipeId(recipe.id)
-    setBuilderRecipe({
-      ...recipe,
-      source: 'custom',
-      ingredients:
-        recipe.ingredients.length > 0 ? recipe.ingredients : [defaultIngredient()],
-      steps: recipe.steps.length > 0 ? recipe.steps : [defaultStep()],
-    })
-  }
-
-  const removeRecipe = (recipeId: string) => {
-    setCustomRecipes((current) => current.filter((recipe) => recipe.id !== recipeId))
-    if (editingRecipeId === recipeId) {
-      resetBuilder()
-    }
-    setStatusMessage('Recipe removed from local storage.')
+    const endTimestamp = Date.now() + activeCookStep.timerMinutes * 60_000
+    setCookMode({ ...cookMode, timerEndsAt: endTimestamp })
   }
 
   return (
-    <div className="app-shell">
+    <div className="studio">
       <header className="hero">
-        <p className="eyebrow">Static app • UK-first units</p>
-        <h1>Recipe Creator</h1>
-        <p>
-          Build meals from what you already have, scale servings instantly, and share recipes with a
-          link. Works fully in-browser with no backend.
-        </p>
+        <div>
+          <p className="kicker">AI RECIPE STUDIO</p>
+          <h1>Recipe Creator: LLM Edition</h1>
+          <p>
+            Dynamic, model-generated recipes tailored to your pantry and constraints. Interactive cook
+            mode, smart refinements, and a local cookbook included.
+          </p>
+        </div>
+        <div className="hero-metrics" aria-label="Live app metrics">
+          <p>
+            <strong>{generatedRecipes.length}</strong>
+            <span>Live recipes</span>
+          </p>
+          <p>
+            <strong>{shoppingList.length}</strong>
+            <span>Shopping items</span>
+          </p>
+          <p>
+            <strong>{customRecipes.length}</strong>
+            <span>Cookbook saved</span>
+          </p>
+        </div>
       </header>
 
-      <nav className="tabs" aria-label="App sections">
-        <button
-          className={activeTab === 'generator' ? 'active' : ''}
-          onClick={() => setActiveTab('generator')}
-          type="button"
-        >
-          Generate Recipes
-        </button>
-        <button
-          className={activeTab === 'builder' ? 'active' : ''}
-          onClick={() => setActiveTab('builder')}
-          type="button"
-        >
-          Recipe Builder
-        </button>
-      </nav>
-
       {statusMessage && (
-        <p className="status-message" role="status">
+        <p className="banner status" role="status">
           {statusMessage}
         </p>
       )}
       {errorMessage && (
-        <p className="error-message" role="alert">
+        <p className="banner error" role="alert">
           {errorMessage}
         </p>
       )}
 
-      {activeTab === 'generator' && (
-        <section className="panel-grid">
-          <aside className="panel">
-            <h2>Pantry</h2>
-            <form onSubmit={handlePantrySubmit} className="inline-form">
-              <label htmlFor="pantry-input">Add ingredient</label>
+      <section className="workspace">
+        <aside className="panel controls">
+          <h2>Generate</h2>
+
+          <fieldset>
+            <legend>LLM Engine</legend>
+            <label htmlFor="api-key">API key</label>
+            <input
+              id="api-key"
+              type="password"
+              value={aiSettings.apiKey}
+              onChange={(event) =>
+                setAiSettings((current) => ({ ...current, apiKey: event.target.value }))
+              }
+              placeholder="sk-..."
+            />
+
+            <label htmlFor="model">Model</label>
+            <input
+              id="model"
+              value={aiSettings.model}
+              onChange={(event) =>
+                setAiSettings((current) => ({ ...current, model: event.target.value }))
+              }
+            />
+
+            <label htmlFor="endpoint">Endpoint</label>
+            <input
+              id="endpoint"
+              value={aiSettings.endpoint}
+              onChange={(event) =>
+                setAiSettings((current) => ({ ...current, endpoint: event.target.value }))
+              }
+            />
+
+            <label htmlFor="creativity">Creativity ({aiSettings.creativity.toFixed(1)})</label>
+            <input
+              id="creativity"
+              type="range"
+              min={0}
+              max={1.2}
+              step={0.1}
+              value={aiSettings.creativity}
+              onChange={(event) =>
+                setAiSettings((current) => ({
+                  ...current,
+                  creativity: Number(event.target.value),
+                }))
+              }
+            />
+
+            <label className="inline-check">
               <input
-                id="pantry-input"
+                type="checkbox"
+                checked={aiSettings.rememberKey}
+                onChange={(event) =>
+                  setAiSettings((current) => ({ ...current, rememberKey: event.target.checked }))
+                }
+              />
+              Remember API key on this device
+            </label>
+          </fieldset>
+
+          <fieldset>
+            <legend>Pantry</legend>
+            <form onSubmit={handlePantrySubmit} className="row-form">
+              <label htmlFor="pantry-item">Ingredient</label>
+              <input
+                id="pantry-item"
                 value={pantryInput}
                 onChange={(event) => setPantryInput(event.target.value)}
-                placeholder="e.g. chopped tomatoes"
+                placeholder="e.g. cannellini beans"
               />
               <button type="submit">Add</button>
             </form>
 
-            <div className="chip-row" aria-label="Suggested pantry tags">
-              {PANTRY_SUGGESTIONS.map((tag) => (
-                <button
-                  key={tag}
-                  type="button"
-                  className="chip"
-                  onClick={() => handleAddPantryItem(tag)}
-                >
-                  + {tag}
+            <div className="chips">
+              {PANTRY_SUGGESTIONS.map((item) => (
+                <button key={item} type="button" className="chip" onClick={() => addPantryItem(item)}>
+                  + {item}
                 </button>
               ))}
             </div>
 
-            {pantryItems.length === 0 ? (
-              <p className="empty-state">No pantry items yet. Add a few to improve recipe matching.</p>
-            ) : (
-              <ul className="list-reset">
-                {pantryItems.map((item) => (
-                  <li key={item}>
-                    <span>{item}</span>
-                    <button
-                      type="button"
-                      className="link-button"
-                      onClick={() =>
-                        setPantryItems((current) => current.filter((existingItem) => existingItem !== item))
-                      }
-                    >
-                      Remove
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            )}
-
-            <h2>Preferences</h2>
-            <div className="field-grid">
-              <label htmlFor="servings">Servings</label>
-              <input
-                id="servings"
-                type="number"
-                min={1}
-                max={20}
-                value={preferences.servings}
-                onChange={(event) =>
-                  setPreferences((current) => ({
-                    ...current,
-                    servings: Math.max(1, Number(event.target.value) || 1),
-                  }))
-                }
-              />
-
-              <label htmlFor="cook-time">Max cook time (minutes)</label>
-              <input
-                id="cook-time"
-                type="number"
-                min={10}
-                max={240}
-                value={preferences.maxCookTime}
-                onChange={(event) =>
-                  setPreferences((current) => ({
-                    ...current,
-                    maxCookTime: Math.max(10, Number(event.target.value) || 10),
-                  }))
-                }
-              />
-
-              <label htmlFor="cuisine">Cuisine style (optional)</label>
-              <input
-                id="cuisine"
-                value={preferences.cuisine}
-                onChange={(event) =>
-                  setPreferences((current) => ({ ...current, cuisine: event.target.value }))
-                }
-                placeholder="e.g. Italian"
-              />
-            </div>
-
-            <fieldset>
-              <legend>Dietary</legend>
-              <div className="checkbox-grid">
-                {DIETARY_OPTIONS.map((dietaryTag) => (
-                  <label key={dietaryTag}>
-                    <input
-                      type="checkbox"
-                      checked={preferences.dietary.includes(dietaryTag)}
-                      onChange={() =>
-                        setPreferences((current) => ({
-                          ...current,
-                          dietary: toggleListValue(current.dietary, dietaryTag),
-                        }))
-                      }
-                    />
-                    {dietaryTag}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset>
-              <legend>Allergens to avoid</legend>
-              <div className="checkbox-grid">
-                {ALLERGEN_OPTIONS.map((allergen) => (
-                  <label key={allergen}>
-                    <input
-                      type="checkbox"
-                      checked={preferences.allergensToAvoid.includes(allergen)}
-                      onChange={() =>
-                        setPreferences((current) => ({
-                          ...current,
-                          allergensToAvoid: toggleListValue(current.allergensToAvoid, allergen),
-                        }))
-                      }
-                    />
-                    {allergen}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset>
-              <legend>Equipment available</legend>
-              <div className="checkbox-grid">
-                {(['hob', 'oven', 'air-fryer'] satisfies Equipment[]).map((equipment) => (
-                  <label key={equipment}>
-                    <input
-                      type="checkbox"
-                      checked={preferences.equipment.includes(equipment)}
-                      onChange={() =>
-                        setPreferences((current) => ({
-                          ...current,
-                          equipment: toggleListValue(current.equipment, equipment),
-                        }))
-                      }
-                    />
-                    {equipment}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <div className="action-row">
-              <button type="button" onClick={handleGenerateRecipes}>
-                Generate 3-6 recipes
-              </button>
-              <label className="import-label" htmlFor="import-recipes">
-                Import JSON
-              </label>
-              <input id="import-recipes" type="file" accept="application/json" onChange={handleImport} />
-            </div>
-          </aside>
-
-          <div className="panel recipe-results">
-            <h2>Recipe options</h2>
-            {generatedRecipes.length === 0 ? (
-              <p className="empty-state">
-                No recipes generated yet. Add pantry items, set preferences, and run generation.
-              </p>
-            ) : (
-              <div className="recipe-grid">
-                {generatedRecipes.map((recipe) => {
-                  const scaledIngredients = scaleIngredients(
-                    recipe.ingredients,
-                    recipe.servings,
-                    preferences.servings,
-                  )
-                  const missing = missingIngredients(recipe, pantryItems)
-                  const swaps = buildSwapSuggestions(recipe, preferences.dietary, pantryItems)
-
-                  return (
-                    <article key={recipe.id} className="recipe-card" aria-label={recipe.title}>
-                      <header>
-                        <h3>{recipe.title}</h3>
-                        <p>{recipe.description}</p>
-                        <p className="meta">
-                          {recipe.cuisine} • {recipe.difficulty} • {recipe.cookTimeMinutes} min
-                        </p>
-                      </header>
-
-                      <section>
-                        <h4>Ingredients ({preferences.servings} servings)</h4>
-                        <ul>
-                          {scaledIngredients.map((ingredient, index) => (
-                            <li key={`${recipe.id}-ingredient-${index}`}>{formatIngredient(ingredient)}</li>
-                          ))}
-                        </ul>
-                      </section>
-
-                      <section>
-                        <h4>Method</h4>
-                        <ol>
-                          {recipe.steps.map((step, index) => (
-                            <li key={`${recipe.id}-step-${index}`}>
-                              {step.text}
-                              {step.timerMinutes ? ` (${step.timerMinutes} min)` : ''}
-                              {step.notes ? ` - ${step.notes}` : ''}
-                            </li>
-                          ))}
-                        </ol>
-                      </section>
-
-                      <section>
-                        <h4>What you&apos;re missing</h4>
-                        {missing.length === 0 ? (
-                          <p>Nothing missing from your pantry list.</p>
-                        ) : (
-                          <ul>
-                            {missing.map((ingredient, index) => (
-                              <li key={`${recipe.id}-missing-${index}`}>{ingredient.name}</li>
-                            ))}
-                          </ul>
-                        )}
-                      </section>
-
-                      <section>
-                        <h4>Swap suggestions</h4>
-                        <ul>
-                          {swaps.map((swap, index) => (
-                            <li key={`${recipe.id}-swap-${index}`}>{swap}</li>
-                          ))}
-                        </ul>
-                      </section>
-
-                      <div className="action-row">
-                        <button type="button" onClick={() => handleCopyRecipe(recipe)}>
-                          Copy recipe
-                        </button>
-                        <button type="button" onClick={() => downloadRecipeJson(recipe)}>
-                          Export JSON
-                        </button>
-                        <button type="button" onClick={() => handleCopyShareLink(recipe)}>
-                          Copy share link
-                        </button>
-                        {recipe.source !== 'base' && (
-                          <button type="button" onClick={() => editRecipe(recipe)}>
-                            Edit
-                          </button>
-                        )}
-                      </div>
-                    </article>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </section>
-      )}
-
-      {activeTab === 'builder' && (
-        <section className="panel-grid">
-          <div className="panel">
-            <h2>{editingRecipeId ? 'Edit recipe' : 'Create recipe'}</h2>
-            <div className="field-grid">
-              <label htmlFor="recipe-title">Title</label>
-              <input
-                id="recipe-title"
-                value={builderRecipe.title}
-                onChange={(event) =>
-                  setBuilderRecipe((current) => ({ ...current, title: event.target.value }))
-                }
-              />
-
-              <label htmlFor="recipe-description">Short description</label>
-              <textarea
-                id="recipe-description"
-                value={builderRecipe.description}
-                onChange={(event) =>
-                  setBuilderRecipe((current) => ({ ...current, description: event.target.value }))
-                }
-              />
-
-              <label htmlFor="recipe-cuisine">Cuisine</label>
-              <input
-                id="recipe-cuisine"
-                value={builderRecipe.cuisine}
-                onChange={(event) =>
-                  setBuilderRecipe((current) => ({ ...current, cuisine: event.target.value }))
-                }
-              />
-
-              <label htmlFor="recipe-difficulty">Difficulty</label>
-              <select
-                id="recipe-difficulty"
-                value={builderRecipe.difficulty}
-                onChange={(event) =>
-                  setBuilderRecipe((current) => ({
-                    ...current,
-                    difficulty: event.target.value as Recipe['difficulty'],
-                  }))
-                }
-              >
-                <option value="Easy">Easy</option>
-                <option value="Medium">Medium</option>
-                <option value="Hard">Hard</option>
-              </select>
-
-              <label htmlFor="recipe-servings">Servings</label>
-              <input
-                id="recipe-servings"
-                type="number"
-                min={1}
-                value={builderRecipe.servings}
-                onChange={(event) =>
-                  setBuilderRecipe((current) => ({
-                    ...current,
-                    servings: Math.max(1, Number(event.target.value) || 1),
-                  }))
-                }
-              />
-
-              <label htmlFor="recipe-cooktime">Cook time (minutes)</label>
-              <input
-                id="recipe-cooktime"
-                type="number"
-                min={5}
-                value={builderRecipe.cookTimeMinutes}
-                onChange={(event) =>
-                  setBuilderRecipe((current) => ({
-                    ...current,
-                    cookTimeMinutes: Math.max(5, Number(event.target.value) || 5),
-                  }))
-                }
-              />
-            </div>
-
-            <fieldset>
-              <legend>Dietary tags</legend>
-              <div className="checkbox-grid">
-                {DIETARY_OPTIONS.map((dietaryTag) => (
-                  <label key={dietaryTag}>
-                    <input
-                      type="checkbox"
-                      checked={builderRecipe.dietaryTags.includes(dietaryTag)}
-                      onChange={() =>
-                        setBuilderRecipe((current) => ({
-                          ...current,
-                          dietaryTags: toggleListValue(current.dietaryTags, dietaryTag),
-                        }))
-                      }
-                    />
-                    {dietaryTag}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset>
-              <legend>Allergens</legend>
-              <div className="checkbox-grid">
-                {ALLERGEN_OPTIONS.map((allergen) => (
-                  <label key={allergen}>
-                    <input
-                      type="checkbox"
-                      checked={builderRecipe.allergens.includes(allergen)}
-                      onChange={() =>
-                        setBuilderRecipe((current) => ({
-                          ...current,
-                          allergens: toggleListValue(current.allergens, allergen),
-                        }))
-                      }
-                    />
-                    {allergen}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <fieldset>
-              <legend>Equipment</legend>
-              <div className="checkbox-grid">
-                {(['hob', 'oven', 'air-fryer'] satisfies Equipment[]).map((equipment) => (
-                  <label key={equipment}>
-                    <input
-                      type="checkbox"
-                      checked={builderRecipe.equipment.includes(equipment)}
-                      onChange={() =>
-                        setBuilderRecipe((current) => ({
-                          ...current,
-                          equipment: toggleListValue(current.equipment, equipment),
-                        }))
-                      }
-                    />
-                    {equipment}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-
-            <h3>Ingredients</h3>
-            <div className="builder-list">
-              {builderRecipe.ingredients.map((ingredient, index) => (
-                <div className="builder-row" key={`builder-ingredient-${index}`}>
-                  <input
-                    aria-label={`Ingredient name ${index + 1}`}
-                    placeholder="Ingredient"
-                    value={ingredient.name}
-                    onChange={(event) => updateBuilderIngredient(index, 'name', event.target.value)}
-                  />
-                  <input
-                    aria-label={`Ingredient quantity ${index + 1}`}
-                    type="number"
-                    min={0}
-                    step={0.1}
-                    value={ingredient.quantity}
-                    onChange={(event) =>
-                      updateBuilderIngredient(index, 'quantity', Number(event.target.value) || 0)
-                    }
-                  />
-                  <select
-                    aria-label={`Ingredient unit ${index + 1}`}
-                    value={ingredient.unit}
-                    onChange={(event) => updateBuilderIngredient(index, 'unit', event.target.value)}
-                  >
-                    {UNIT_OPTIONS.map((unit) => (
-                      <option key={unit} value={unit}>
-                        {unit}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    aria-label={`Ingredient notes ${index + 1}`}
-                    placeholder="Notes"
-                    value={ingredient.notes ?? ''}
-                    onChange={(event) => updateBuilderIngredient(index, 'notes', event.target.value)}
-                  />
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={Boolean(ingredient.optional)}
-                      onChange={(event) =>
-                        updateBuilderIngredient(index, 'optional', event.target.checked)
-                      }
-                    />
-                    Optional
-                  </label>
+            <ul className="token-list" aria-label="Pantry items">
+              {pantryItems.map((item) => (
+                <li key={item}>
+                  <span>{item}</span>
                   <button
                     type="button"
+                    className="link"
                     onClick={() =>
-                      setBuilderRecipe((current) => ({
-                        ...current,
-                        ingredients: current.ingredients.filter(
-                          (_currentIngredient, ingredientIndex) => ingredientIndex !== index,
-                        ),
-                      }))
+                      setPantryItems((current) => current.filter((entry) => entry !== item))
                     }
-                    disabled={builderRecipe.ingredients.length <= 1}
                   >
                     Remove
                   </button>
-                </div>
+                </li>
               ))}
-              <button
-                type="button"
-                onClick={() =>
-                  setBuilderRecipe((current) => ({
-                    ...current,
-                    ingredients: [...current.ingredients, defaultIngredient()],
-                  }))
-                }
-              >
-                Add ingredient
-              </button>
-            </div>
+            </ul>
+          </fieldset>
 
-            <h3>Method steps</h3>
-            <div className="builder-list">
-              {builderRecipe.steps.map((step, index) => (
-                <div className="builder-row" key={`builder-step-${index}`}>
-                  <textarea
-                    aria-label={`Step text ${index + 1}`}
-                    placeholder={`Step ${index + 1}`}
-                    value={step.text}
-                    onChange={(event) => updateBuilderStep(index, 'text', event.target.value)}
-                  />
+          <fieldset>
+            <legend>Preferences</legend>
+            <label htmlFor="servings">Servings</label>
+            <input
+              id="servings"
+              type="number"
+              min={1}
+              max={16}
+              value={preferences.servings}
+              onChange={(event) =>
+                setPreferences((current) => ({
+                  ...current,
+                  servings: Math.max(1, Number(event.target.value) || 1),
+                }))
+              }
+            />
+
+            <label htmlFor="cook-time">Max cook time (minutes)</label>
+            <input
+              id="cook-time"
+              type="number"
+              min={10}
+              max={240}
+              value={preferences.maxCookTime}
+              onChange={(event) =>
+                setPreferences((current) => ({
+                  ...current,
+                  maxCookTime: Math.max(10, Number(event.target.value) || 10),
+                }))
+              }
+            />
+
+            <label htmlFor="cuisine">Cuisine focus</label>
+            <input
+              id="cuisine"
+              value={preferences.cuisine}
+              onChange={(event) =>
+                setPreferences((current) => ({ ...current, cuisine: event.target.value }))
+              }
+              placeholder="Italian, Levantine, British..."
+            />
+
+            <label htmlFor="recipe-count">Recipe count ({recipeCount})</label>
+            <input
+              id="recipe-count"
+              type="range"
+              min={3}
+              max={6}
+              value={recipeCount}
+              onChange={(event) => setRecipeCount(Number(event.target.value))}
+            />
+
+            <div className="check-grid">
+              {DIETARY_OPTIONS.map((tag) => (
+                <label key={tag}>
                   <input
-                    aria-label={`Step timer ${index + 1}`}
-                    type="number"
-                    min={0}
-                    placeholder="Timer (min)"
-                    value={step.timerMinutes ?? ''}
-                    onChange={(event) => {
-                      const numericValue = Number(event.target.value)
-                      updateBuilderStep(
-                        index,
-                        'timerMinutes',
-                        Number.isFinite(numericValue) && numericValue > 0 ? numericValue : undefined,
-                      )
-                    }}
-                  />
-                  <input
-                    aria-label={`Step notes ${index + 1}`}
-                    placeholder="Notes"
-                    value={step.notes ?? ''}
-                    onChange={(event) => updateBuilderStep(index, 'notes', event.target.value)}
-                  />
-                  <button
-                    type="button"
-                    onClick={() =>
-                      setBuilderRecipe((current) => ({
+                    type="checkbox"
+                    checked={preferences.dietary.includes(tag)}
+                    onChange={() =>
+                      setPreferences((current) => ({
                         ...current,
-                        steps: current.steps.filter((_currentStep, stepIndex) => stepIndex !== index),
+                        dietary: toggleListValue(current.dietary, tag),
                       }))
                     }
-                    disabled={builderRecipe.steps.length <= 1}
-                  >
-                    Remove
-                  </button>
-                </div>
+                  />
+                  {tag}
+                </label>
               ))}
-              <button
-                type="button"
-                onClick={() =>
-                  setBuilderRecipe((current) => ({
-                    ...current,
-                    steps: [...current.steps, defaultStep()],
-                  }))
-                }
-              >
-                Add step
-              </button>
             </div>
+
+            <div className="check-grid">
+              {ALLERGEN_OPTIONS.map((allergen) => (
+                <label key={allergen}>
+                  <input
+                    type="checkbox"
+                    checked={preferences.allergensToAvoid.includes(allergen)}
+                    onChange={() =>
+                      setPreferences((current) => ({
+                        ...current,
+                        allergensToAvoid: toggleListValue(current.allergensToAvoid, allergen),
+                      }))
+                    }
+                  />
+                  avoid {allergen}
+                </label>
+              ))}
+            </div>
+
+            <div className="check-grid">
+              {equipmentOptions.map((equipment) => (
+                <label key={equipment}>
+                  <input
+                    type="checkbox"
+                    checked={preferences.equipment.includes(equipment)}
+                    onChange={() =>
+                      setPreferences((current) => ({
+                        ...current,
+                        equipment: toggleListValue(current.equipment, equipment),
+                      }))
+                    }
+                  />
+                  {equipment}
+                </label>
+              ))}
+            </div>
+          </fieldset>
+
+          <fieldset>
+            <legend>Prompt Studio</legend>
+            <label htmlFor="goal">Generation goal</label>
+            <textarea
+              id="goal"
+              value={goalPrompt}
+              onChange={(event) => setGoalPrompt(event.target.value)}
+            />
 
             <div className="action-row">
-              <button type="button" onClick={saveBuilderRecipe}>
-                {editingRecipeId ? 'Update recipe' : 'Save recipe'}
-              </button>
-              <button type="button" onClick={resetBuilder}>
-                Reset form
-              </button>
+              {defaultGoals.map((goal) => (
+                <button key={goal} type="button" className="ghost" onClick={() => setGoalPrompt(goal)}>
+                  {goal.split(' ').slice(0, 3).join(' ')}...
+                </button>
+              ))}
             </div>
-          </div>
 
-          <aside className="panel">
-            <h2>Saved recipes</h2>
-            {customRecipes.length === 0 ? (
-              <p className="empty-state">No custom recipes yet. Build one and save it locally.</p>
-            ) : (
-              <ul className="list-reset">
-                {customRecipes.map((recipe) => (
+            <button type="button" className="primary" onClick={handleGenerateRecipes} disabled={isGenerating}>
+              {isGenerating ? 'Generating...' : 'Generate Astonishing Recipes'}
+            </button>
+          </fieldset>
+
+          <fieldset>
+            <legend>Follow-up Refinement</legend>
+            <label htmlFor="follow-up">Instruction</label>
+            <textarea
+              id="follow-up"
+              value={followUpPrompt}
+              onChange={(event) => setFollowUpPrompt(event.target.value)}
+              placeholder="Make it air-fryer friendly, lower dairy, more spice, under 25 min..."
+            />
+            <button type="button" onClick={handleRefineRecipe} disabled={isGenerating || !selectedRecipe}>
+              Refine Selected Recipe
+            </button>
+          </fieldset>
+
+          <fieldset>
+            <legend>Import / Cookbook</legend>
+            <label htmlFor="import-json" className="upload-label">
+              Import JSON recipes
+            </label>
+            <input id="import-json" type="file" accept="application/json" onChange={importRecipes} />
+
+            <ul className="cookbook-list">
+              {customRecipes.length === 0 ? (
+                <li className="empty">No cookbook recipes yet.</li>
+              ) : (
+                customRecipes.map((recipe) => (
                   <li key={recipe.id}>
                     <div>
                       <strong>{recipe.title}</strong>
                       <p>
-                        {recipe.cuisine} • {recipe.cookTimeMinutes} min • serves {recipe.servings}
+                        {recipe.cuisine} • {recipe.cookTimeMinutes} min
                       </p>
                     </div>
                     <div className="action-row">
-                      <button type="button" onClick={() => editRecipe(recipe)}>
-                        Edit
+                      <button type="button" onClick={() => loadCookbookRecipe(recipe)}>
+                        Load
                       </button>
-                      <button type="button" onClick={() => downloadRecipeJson(recipe)}>
-                        Export
-                      </button>
-                      <button type="button" onClick={() => handleCopyShareLink(recipe)}>
-                        Share
-                      </button>
-                      <button type="button" onClick={() => removeRecipe(recipe.id)}>
+                      <button type="button" className="danger" onClick={() => removeCookbookRecipe(recipe.id)}>
                         Delete
                       </button>
                     </div>
                   </li>
+                ))
+              )}
+            </ul>
+          </fieldset>
+        </aside>
+
+        <main className="panel output">
+          <section className="topline">
+            <h2>Generated Recipes</h2>
+            {shoppingList.length > 0 && (
+              <div className="shopping-inline">
+                <span>Shopping list:</span>
+                <p>{shoppingList.join(', ')}</p>
+              </div>
+            )}
+          </section>
+
+          {generatedRecipes.length === 0 ? (
+            <div className="empty-hero">
+              <h3>Nothing generated yet</h3>
+              <p>
+                Configure pantry + preferences, then generate. With API key configured, recipes are
+                dynamically created by the LLM. Without it, you still get offline fallback options.
+              </p>
+            </div>
+          ) : (
+            <div className="recipe-grid">
+              {generatedRecipes.map((recipe) => {
+                const targetServings = servingOverrides[recipe.id] ?? preferences.servings
+                const scaledIngredients = scaleIngredients(
+                  recipe.ingredients,
+                  recipe.servings,
+                  targetServings,
+                )
+                const missing = missingIngredients(recipe, pantryItems)
+                const swaps = buildSwapSuggestions(recipe, preferences.dietary, pantryItems)
+                const fit = pantryFitPercent(recipe, pantryItems)
+                const isSelected = recipe.id === selectedRecipeId
+                const isEditing = recipe.id === editingRecipeId
+
+                return (
+                  <article
+                    key={recipe.id}
+                    className={`recipe-card ${isSelected ? 'selected' : ''}`}
+                    aria-label={recipe.title}
+                  >
+                    <header>
+                      <h3>{recipe.title}</h3>
+                      <p>{recipe.description}</p>
+                      <p className="meta">
+                        {recipe.cuisine} • {recipe.difficulty} • {recipe.cookTimeMinutes} min
+                      </p>
+                    </header>
+
+                    <div className="meter" role="progressbar" aria-valuenow={fit} aria-valuemin={0} aria-valuemax={100}>
+                      <div style={{ width: `${fit}%` }} />
+                      <span>{fit}% pantry fit</span>
+                    </div>
+
+                    <div className="action-row">
+                      <button type="button" onClick={() => setSelectedRecipeId(recipe.id)}>
+                        {isSelected ? 'Selected' : 'Select'}
+                      </button>
+                      <button type="button" onClick={() => assignCompare('left', recipe.id)}>
+                        Compare A
+                      </button>
+                      <button type="button" onClick={() => assignCompare('right', recipe.id)}>
+                        Compare B
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setEditingRecipeId(isEditing ? null : recipe.id)}
+                      >
+                        {isEditing ? 'Done Editing' : 'Edit In-Place'}
+                      </button>
+                    </div>
+
+                    <label htmlFor={`servings-${recipe.id}`}>Scale servings ({targetServings})</label>
+                    <input
+                      id={`servings-${recipe.id}`}
+                      type="range"
+                      min={1}
+                      max={16}
+                      value={targetServings}
+                      onChange={(event) =>
+                        setServingOverrides((current) => ({
+                          ...current,
+                          [recipe.id]: Number(event.target.value),
+                        }))
+                      }
+                    />
+
+                    <section>
+                      <h4>Ingredients</h4>
+                      <ul>
+                        {scaledIngredients.map((ingredient, index) => {
+                          if (!isEditing) {
+                            return <li key={`${recipe.id}-ingredient-${index}`}>{formatIngredient(ingredient)}</li>
+                          }
+
+                          return (
+                            <li key={`${recipe.id}-ingredient-${index}`} className="edit-line">
+                              <input
+                                value={ingredient.name}
+                                onChange={(event) =>
+                                  updateRecipe(recipe.id, (current) => ({
+                                    ...current,
+                                    ingredients: current.ingredients.map((entry, entryIndex) =>
+                                      entryIndex === index
+                                        ? { ...entry, name: event.target.value }
+                                        : entry,
+                                    ),
+                                  }))
+                                }
+                              />
+                              <input
+                                type="number"
+                                step={0.1}
+                                value={ingredient.quantity}
+                                onChange={(event) =>
+                                  updateRecipe(recipe.id, (current) => ({
+                                    ...current,
+                                    ingredients: current.ingredients.map((entry, entryIndex) =>
+                                      entryIndex === index
+                                        ? {
+                                            ...entry,
+                                            quantity: Number(event.target.value) || 0,
+                                          }
+                                        : entry,
+                                    ),
+                                  }))
+                                }
+                              />
+                              <select
+                                value={ingredient.unit}
+                                onChange={(event) =>
+                                  updateRecipe(recipe.id, (current) => ({
+                                    ...current,
+                                    ingredients: current.ingredients.map((entry, entryIndex) =>
+                                      entryIndex === index
+                                        ? {
+                                            ...entry,
+                                            unit: event.target.value as Ingredient['unit'],
+                                          }
+                                        : entry,
+                                    ),
+                                  }))
+                                }
+                              >
+                                {UNIT_OPTIONS.map((unit) => (
+                                  <option key={unit} value={unit}>
+                                    {unit}
+                                  </option>
+                                ))}
+                              </select>
+                            </li>
+                          )
+                        })}
+                      </ul>
+
+                      {isEditing && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() =>
+                            updateRecipe(recipe.id, (current) => ({
+                              ...current,
+                              ingredients: [
+                                ...current.ingredients,
+                                { name: 'new ingredient', quantity: 50, unit: 'g' },
+                              ],
+                            }))
+                          }
+                        >
+                          Add ingredient
+                        </button>
+                      )}
+                    </section>
+
+                    <section>
+                      <h4>Method</h4>
+                      <ol>
+                        {recipe.steps.map((step, index) => {
+                          const suffix = [
+                            step.timerMinutes ? `${step.timerMinutes} min` : '',
+                            step.temperatureC ? `${step.temperatureC}C` : '',
+                            step.gasMark ? `Gas ${step.gasMark}` : '',
+                          ]
+                            .filter(Boolean)
+                            .join(' • ')
+
+                          if (!isEditing) {
+                            return (
+                              <li key={`${recipe.id}-step-${index}`}>
+                                {step.text}
+                                {suffix ? ` (${suffix})` : ''}
+                              </li>
+                            )
+                          }
+
+                          return (
+                            <li key={`${recipe.id}-step-${index}`} className="edit-line">
+                              <textarea
+                                value={step.text}
+                                onChange={(event) =>
+                                  updateRecipe(recipe.id, (current) => ({
+                                    ...current,
+                                    steps: current.steps.map((entry, entryIndex) =>
+                                      entryIndex === index ? { ...entry, text: event.target.value } : entry,
+                                    ),
+                                  }))
+                                }
+                              />
+                              <input
+                                type="number"
+                                min={0}
+                                placeholder="Timer"
+                                value={step.timerMinutes ?? ''}
+                                onChange={(event) =>
+                                  updateRecipe(recipe.id, (current) => ({
+                                    ...current,
+                                    steps: current.steps.map((entry, entryIndex) =>
+                                      entryIndex === index
+                                        ? {
+                                            ...entry,
+                                            timerMinutes:
+                                              Number(event.target.value) > 0
+                                                ? Number(event.target.value)
+                                                : undefined,
+                                          }
+                                        : entry,
+                                    ),
+                                  }))
+                                }
+                              />
+                            </li>
+                          )
+                        })}
+                      </ol>
+
+                      {isEditing && (
+                        <button
+                          type="button"
+                          className="ghost"
+                          onClick={() =>
+                            updateRecipe(recipe.id, (current) => ({
+                              ...current,
+                              steps: [...current.steps, { text: 'New step' }],
+                            }))
+                          }
+                        >
+                          Add step
+                        </button>
+                      )}
+                    </section>
+
+                    <section>
+                      <h4>What you&apos;re missing</h4>
+                      {missing.length === 0 ? (
+                        <p>Nothing essential missing from pantry.</p>
+                      ) : (
+                        <ul>
+                          {missing.map((ingredient, index) => (
+                            <li key={`${recipe.id}-missing-${index}`}>{ingredient.name}</li>
+                          ))}
+                        </ul>
+                      )}
+                    </section>
+
+                    <section>
+                      <h4>Swap suggestions</h4>
+                      <ul>
+                        {swaps.map((swap, index) => (
+                          <li key={`${recipe.id}-swap-${index}`}>{swap}</li>
+                        ))}
+                      </ul>
+                    </section>
+
+                    {recipe.tips && recipe.tips.length > 0 && (
+                      <section>
+                        <h4>Chef tips</h4>
+                        <ul>
+                          {recipe.tips.map((tip, index) => (
+                            <li key={`${recipe.id}-tip-${index}`}>{tip}</li>
+                          ))}
+                        </ul>
+                      </section>
+                    )}
+
+                    <div className="action-row">
+                      <button type="button" onClick={() => copyRecipe(recipe)}>
+                        Copy
+                      </button>
+                      <button type="button" onClick={() => exportRecipe(recipe)}>
+                        Export JSON
+                      </button>
+                      <button type="button" onClick={() => copyText(buildShareUrl(recipe), 'Share URL copied.')}
+                      >
+                        Share Link
+                      </button>
+                      <button type="button" onClick={() => duplicateIntoCookbook(recipe)}>
+                        Save to Cookbook
+                      </button>
+                      <button type="button" onClick={() => startCookMode(recipe.id)}>
+                        Start Cook Mode
+                      </button>
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )}
+
+          {(compareLeft || compareRight) && (
+            <section className="compare-panel">
+              <h3>Recipe Comparison</h3>
+              <div className="compare-grid">
+                <div>
+                  <h4>{compareLeft?.title ?? 'Select Compare A'}</h4>
+                  {compareLeft && (
+                    <ul>
+                      <li>{compareLeft.cuisine}</li>
+                      <li>{compareLeft.cookTimeMinutes} min</li>
+                      <li>{compareLeft.difficulty}</li>
+                      <li>{pantryFitPercent(compareLeft, pantryItems)}% pantry fit</li>
+                    </ul>
+                  )}
+                </div>
+                <div>
+                  <h4>{compareRight?.title ?? 'Select Compare B'}</h4>
+                  {compareRight && (
+                    <ul>
+                      <li>{compareRight.cuisine}</li>
+                      <li>{compareRight.cookTimeMinutes} min</li>
+                      <li>{compareRight.difficulty}</li>
+                      <li>{pantryFitPercent(compareRight, pantryItems)}% pantry fit</li>
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {conversation.length > 0 && (
+            <section className="conversation-panel">
+              <h3>Chef Assistant Trace</h3>
+              <ul>
+                {conversation.slice(0, 10).map((turn, index) => (
+                  <li key={`${turn.createdAt}-${index}`}>
+                    <strong>{turn.role === 'assistant' ? 'Assistant' : 'You'}:</strong> {turn.text}
+                  </li>
                 ))}
               </ul>
+            </section>
+          )}
+        </main>
+      </section>
+
+      {cookMode && activeCookRecipe && activeCookStep && (
+        <section className="cook-mode" aria-label="Cook mode" role="dialog" aria-modal="true">
+          <div className="cook-card">
+            <header>
+              <h2>{activeCookRecipe.title} - Cook Mode</h2>
+              <button type="button" className="danger" onClick={() => setCookMode(null)}>
+                Close
+              </button>
+            </header>
+
+            <p>
+              Step {cookMode.stepIndex + 1} / {activeCookRecipe.steps.length}
+            </p>
+            <p className="cook-step">{activeCookStep.text}</p>
+
+            {activeCookStep.notes && <p className="cook-note">Note: {activeCookStep.notes}</p>}
+
+            <div className="action-row">
+              <button type="button" onClick={() => moveCookStep(-1)}>
+                Previous
+              </button>
+              <button type="button" onClick={() => moveCookStep(1)}>
+                Next
+              </button>
+              {activeCookStep.timerMinutes && (
+                <button type="button" onClick={startStepTimer}>
+                  Start {activeCookStep.timerMinutes} min Timer
+                </button>
+              )}
+            </div>
+
+            {cookMode.timerEndsAt && (
+              <p className="timer">Timer: {Math.floor(timerSecondsRemaining / 60)}:{String(timerSecondsRemaining % 60).padStart(2, '0')}</p>
             )}
-          </aside>
+          </div>
         </section>
       )}
     </div>

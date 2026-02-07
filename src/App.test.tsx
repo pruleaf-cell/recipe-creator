@@ -3,9 +3,70 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import App from './App'
 
-describe('App', () => {
+const buildModelResponse = (title: string): string =>
+  JSON.stringify({
+    choices: [
+      {
+        message: {
+          content: JSON.stringify({
+            assistantSummary: `Generated ${title}`,
+            recipes: [
+              {
+                title,
+                description: 'A dynamic recipe from tests.',
+                cuisine: 'Test Kitchen',
+                difficulty: 'Easy',
+                cookTimeMinutes: 24,
+                servings: 2,
+                dietaryTags: ['vegetarian'],
+                allergens: ['dairy'],
+                equipment: ['hob'],
+                ingredients: [
+                  {
+                    name: 'onion',
+                    quantity: 1,
+                    unit: 'whole',
+                    optional: false,
+                    notes: '',
+                  },
+                  {
+                    name: 'olive oil',
+                    quantity: 1,
+                    unit: 'tbsp',
+                    optional: false,
+                    notes: '',
+                  },
+                ],
+                steps: [
+                  {
+                    text: 'Chop the onion.',
+                    timerMinutes: 2,
+                    notes: '',
+                    temperatureC: 0,
+                    gasMark: '',
+                  },
+                  {
+                    text: 'Saute until softened.',
+                    timerMinutes: 8,
+                    notes: '',
+                    temperatureC: 0,
+                    gasMark: '',
+                  },
+                ],
+                swapSuggestions: ['Swap onion for shallot.'],
+                tips: ['Warm plates before serving.'],
+              },
+            ],
+          }),
+        },
+      },
+    ],
+  })
+
+describe('App LLM interactions', () => {
   beforeEach(() => {
     localStorage.clear()
+    vi.stubGlobal('fetch', vi.fn())
     vi.stubGlobal('navigator', {
       ...window.navigator,
       clipboard: {
@@ -14,31 +75,66 @@ describe('App', () => {
     })
   })
 
-  it('renders and generates recipe options', async () => {
+  it('generates recipes from the LLM endpoint', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      text: async () => buildModelResponse('Test LLM Pasta'),
+    } as Response)
+
     const user = userEvent.setup()
     render(<App />)
 
-    await user.type(screen.getByLabelText(/Add ingredient/i), 'onion')
-    await user.click(screen.getByRole('button', { name: 'Add' }))
-    await user.click(screen.getByRole('button', { name: /Generate 3-6 recipes/i }))
+    await user.type(screen.getByLabelText(/^API key$/i), 'sk-test-key')
+    await user.click(screen.getByRole('button', { name: /Generate Astonishing Recipes/i }))
 
-    expect(await screen.findByText(/Generated \d recipe options/i)).toBeInTheDocument()
-    expect(screen.getAllByRole('heading', { level: 3 }).length).toBeGreaterThan(0)
+    expect(await screen.findByText('Test LLM Pasta')).toBeInTheDocument()
+    expect(screen.getAllByText(/Generated Test LLM Pasta/i).length).toBeGreaterThan(0)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('creates and saves a custom recipe in the builder', async () => {
+  it('refines the selected recipe with follow-up instruction', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => buildModelResponse('Original Recipe'),
+      } as Response)
+      .mockResolvedValueOnce({
+        ok: true,
+        text: async () => buildModelResponse('Refined Recipe'),
+      } as Response)
+
     const user = userEvent.setup()
     render(<App />)
 
-    await user.click(screen.getByRole('button', { name: /Recipe Builder/i }))
-    await user.type(screen.getByLabelText('Title'), 'My Test Soup')
-    await user.type(screen.getByLabelText('Ingredient name 1'), 'carrot')
-    await user.clear(screen.getByLabelText('Step text 1'))
-    await user.type(screen.getByLabelText('Step text 1'), 'Chop and simmer for 20 minutes.')
+    await user.type(screen.getByLabelText(/^API key$/i), 'sk-test-key')
+    await user.click(screen.getByRole('button', { name: /Generate Astonishing Recipes/i }))
+    expect(await screen.findByText('Original Recipe')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: /Save recipe/i }))
+    await user.type(screen.getByLabelText(/Instruction/i), 'Make it spicier and under 20 minutes.')
+    await user.click(screen.getByRole('button', { name: /Refine Selected Recipe/i }))
 
-    expect(await screen.findByText(/Recipe saved to local storage/i)).toBeInTheDocument()
-    expect(screen.getByText('My Test Soup')).toBeInTheDocument()
+    expect(await screen.findByText('Refined Recipe')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('opens cook mode from a generated recipe card', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValue({
+      ok: true,
+      text: async () => buildModelResponse('Cook Mode Recipe'),
+    } as Response)
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    await user.type(screen.getByLabelText(/^API key$/i), 'sk-test-key')
+    await user.click(screen.getByRole('button', { name: /Generate Astonishing Recipes/i }))
+    expect(await screen.findByText('Cook Mode Recipe')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /Start Cook Mode/i }))
+
+    expect(await screen.findByRole('dialog', { name: /Cook mode/i })).toBeInTheDocument()
   })
 })

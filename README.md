@@ -1,36 +1,38 @@
-# Recipe Creator
+# Recipe Creator - LLM Edition
 
-Recipe Creator is a static React + TypeScript app for generating recipes from pantry items, building custom recipes, and sharing/exporting recipes without any backend.
+Recipe Creator is now an AI-powered static web app that generates recipes dynamically from an LLM based on your pantry, constraints, and follow-up prompts.
 
-## Highlights
+Live URL: https://pruleaf-cell.github.io/recipe-creator/
 
-- Pantry input with quick ingredient tags
-- Preference controls: servings, max cook time, cuisine, dietary, allergens, equipment
-- Recipe generation with:
-  - 3-6 options
-  - UK units (`g`, `kg`, `ml`, `litres`, `tbsp`, `tsp`)
-  - ingredient scaling by servings
-  - missing-ingredient detection
-  - swap suggestions
-- Recipe Builder:
-  - create/edit recipes
-  - ingredient unit dropdown
-  - method steps with timers/notes
-  - local storage persistence
-- Import/Export/Share:
-  - import recipe JSON
-  - export recipe JSON
-  - share link with recipe encoded in URL
-- Accessibility and responsive layout basics
+## What is new
 
-## Tech Stack
+- Dynamic recipe generation with an LLM (OpenAI-compatible endpoint)
+- Prompt studio with creativity control and recipe count dial
+- Follow-up refinement for selected recipes
+- Interactive recipe cards with:
+  - Pantry-fit scoring
+  - Missing ingredients
+  - Swap suggestions
+  - Servings scaling
+  - In-place ingredient and method editing
+- Cook mode with step navigation and optional timers
+- Recipe comparison panel
+- Local cookbook with import/export
+- Shareable recipe links (recipe encoded in URL)
+
+## UK-first cooking defaults
+
+- Units: `g`, `kg`, `ml`, `litres`, `tbsp`, `tsp`
+- Oven instructions requested in Celsius + Gas Mark
+- Dietary and allergen constraints honored in prompts and post-processing
+
+## Stack
 
 - Vite + React + TypeScript
-- Plain CSS
 - Vitest + React Testing Library
-- GitHub Actions CI + GitHub Pages deploy
+- GitHub Actions CI + GitHub Pages deployment
 
-## Local Development
+## Local development
 
 ```bash
 nvm use
@@ -38,7 +40,7 @@ npm install
 npm run dev
 ```
 
-## Quality Checks
+## Run checks
 
 ```bash
 npm run lint
@@ -46,15 +48,18 @@ npm run test:run
 npm run build
 ```
 
+## LLM configuration
+
+The app runs fully in-browser and supports static hosting (GitHub Pages). To use dynamic AI generation:
+
+1. Open the app.
+2. Enter your API key in the `LLM Engine` panel.
+3. Optional: set a custom model or endpoint.
+
+If no API key is provided, the app falls back to an offline built-in recipe library.
+
 ## Deployment
 
-Deployment is automated via `.github/workflows/deploy-pages.yml` on pushes to `main`.
-
-After first push, ensure repository settings use:
+- CI workflow: `.github/workflows/ci.yml`
+- Pages workflow: `.github/workflows/deploy-pages.yml`
 - Pages source: GitHub Actions
-
-Expected public URL format:
-
-`https://<github-username>.github.io/<repository-name>/`
-
-Workflow note: this commit is prepared for PR merge into main.
